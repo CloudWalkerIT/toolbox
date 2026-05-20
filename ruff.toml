@@ -1,0 +1,19 @@
+# Repo-wide ruff defaults. Per-tool overrides go in that tool's own
+# directory using a sub-ruff.toml or pyproject.toml.
+
+line-length = 100
+target-version = "py312"
+extend-exclude = [".devcontainer"]
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "SIM", # flake8-simplify
+]
+
+[format]
+quote-style = "double"

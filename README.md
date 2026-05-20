@@ -57,6 +57,25 @@ These tools inspect, and in some cases modify, live cloud infrastructure.
 - Never commit credentials, state files, or environment files. The
   `.gitignore` is deliberately strict about secrets; keep it that way.
 
+## Development
+
+A devcontainer is provided so you don't have to install Python, PowerShell,
+or the Azure CLI on your host. Open the repo in VS Code and choose
+"Reopen in Container". The container installs `pre-commit` and its hooks on
+first build.
+
+Working outside the devcontainer is supported too. You'll need Python 3.12+
+and `pre-commit` on PATH, then run `pre-commit install` once in your
+checkout.
+
+Hook commands you'll actually use:
+
+- `pre-commit run --all-files` to lint the whole repo
+- `pre-commit autoupdate` to refresh hook versions
+
+Hooks include baseline file hygiene, `shellcheck`, `ruff` (lint and format),
+and `gitleaks` for secret scanning.
+
 ## Contributing
 
 Work on a feature branch. Add one self-contained tool per directory, with its
