@@ -33,6 +33,9 @@
             "source.organizeImports.ruff": "explicit"
           }
         },
+        "python.analysis.typeCheckingMode": "basic",
+        "python.analysis.diagnosticMode": "workspace",
+        "python.analysis.autoImportCompletions": true,
         "files.trimTrailingWhitespace": true,
         "files.insertFinalNewline": true
       }
