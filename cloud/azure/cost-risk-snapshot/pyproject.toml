@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azure-cost-risk-snapshot"
+version = "0.1.0"
+description = "Read-only snapshot of Azure cost, waste, lifecycle, and security posture."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "CloudWalkerIT" }]
+dependencies = [
+  "azure-identity>=1.17",
+  "azure-mgmt-resourcegraph>=8.0",
+  "azure-mgmt-costmanagement>=4.0",
+  "azure-mgmt-subscription>=3.1",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+]
+
+[project.scripts]
+azure-cost-risk-snapshot = "cost_risk_snapshot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cost_risk_snapshot*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
