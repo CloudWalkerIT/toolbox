@@ -286,6 +286,12 @@ def render_summary(result: RunResult) -> str:
         for s in f.secure_scores:
             pct = "n/a" if s.percentage is None else f"{s.percentage * 100:.0f}%"
             lines.append(f"- `{s.subscription_id}`: {pct}")
+    else:
+        lines.append("")
+        lines.append(
+            "Secure score: not available (Defender for Cloud has not produced one, "
+            "or the credential lacks Security Reader)."
+        )
     lines.append("")
 
     # Advisor ----------------------------------------------------------

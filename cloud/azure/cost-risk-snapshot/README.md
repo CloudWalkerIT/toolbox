@@ -220,3 +220,11 @@ result = run(Config.default(), days=90)
 # result is a RunResult dataclass; dataclasses.asdict(result) matches the
 # data.json shape.
 ```
+
+## Test fixture
+
+[`fixture/`](fixture/) holds a small Terraform environment with one planted
+problem per check (unattached disk and IP, orphaned NIC, deallocated Windows
+Server 2016 VM, RDP open to the internet, loose storage and Key Vault settings).
+Apply it to a throwaway subscription to exercise the tool against real APIs.
+

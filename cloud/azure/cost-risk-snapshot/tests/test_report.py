@@ -132,3 +132,9 @@ def test_classify_each_concerning_signal(clean_result) -> None:
 
     # Medium/low security findings are reported but not concerning.
     assert classify(clean_result) == ExitCode.CLEAN
+
+
+def test_summary_says_secure_score_unavailable(clean_result) -> None:
+    clean_result.findings.secure_scores = []
+    text = render_summary(clean_result)
+    assert "Secure score: not available" in text

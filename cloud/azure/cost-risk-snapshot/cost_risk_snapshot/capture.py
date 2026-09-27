@@ -298,13 +298,18 @@ def map_advisor(rows: list[dict]) -> list[AdvisorRecommendation]:
     out = []
     for r in rows:
         savings = _float_or_none(r.get("annualSavingsAmount"))
+        problem = r.get("problem") or ""
+        solution = r.get("solution") or ""
+        # Advisor often repeats the same short text in both fields.
+        if solution == problem:
+            solution = ""
         currency = (r.get("savingsCurrency") or None) if savings is not None else None
         out.append(
             AdvisorRecommendation(
                 category=r.get("category") or "",
                 impact=r.get("impact") or "",
-                problem=r.get("problem") or "",
-                solution=r.get("solution") or "",
+                problem=problem,
+                solution=solution,
                 impacted_resource_id=r.get("impactedResourceId") or "",
                 subscription_id=r.get("subscriptionId", ""),
                 annual_savings=savings,

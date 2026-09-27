@@ -102,6 +102,8 @@ def test_map_advisor_with_and_without_savings() -> None:
         },
     ]
     out = map_advisor(rows)
+    assert out[0].problem == "Buy reserved instances"
+    assert out[0].solution == ""  # identical to problem, so dropped
     assert out[0].annual_savings == 4200.5
     assert out[0].savings_currency == "USD"
     assert out[1].annual_savings is None
@@ -267,3 +269,18 @@ def test_no_visible_subscriptions_is_an_error(monkeypatch) -> None:
     assert subs == []
     assert findings == Findings()
     assert errors and "no subscriptions" in errors[0].message
+
+
+def test_map_advisor_keeps_distinct_solution() -> None:
+    rows = [
+        {
+            "subscriptionId": SUB,
+            "category": "HighAvailability",
+            "impact": "High",
+            "problem": "No Service Health alert",
+            "solution": "Create an Azure Service Health alert",
+            "impactedResourceId": "/subscriptions/s1",
+        }
+    ]
+    out = map_advisor(rows)
+    assert out[0].solution == "Create an Azure Service Health alert"
