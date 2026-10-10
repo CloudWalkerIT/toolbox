@@ -39,6 +39,11 @@ class ExitCode(IntEnum):
 
 CONCERNING_EOS = {ENDED, ENDS_SOON}
 
+# High-impact Advisor recommendations in other categories (HighAvailability,
+# OperationalExcellence, Performance) are generic best practice that nearly
+# every subscription trips, so they are reported but not concerning.
+CONCERNING_ADVISOR_CATEGORIES = {"cost", "security"}
+
 
 def write_run(result: RunResult, run_dir: Path) -> ExitCode:
     """Write data.json, one CSV per findings array, and summary.md to
@@ -58,7 +63,11 @@ def concerning_counts(result: RunResult) -> dict[str, int]:
     return {
         "waste": len(f.waste),
         "end_of_support": sum(1 for e in f.end_of_support if e.status in CONCERNING_EOS),
-        "advisor_high_impact": sum(1 for a in f.advisor if a.impact.lower() == "high"),
+        "advisor_high_impact": sum(
+            1
+            for a in f.advisor
+            if a.impact.lower() == "high" and a.category.lower() in CONCERNING_ADVISOR_CATEGORIES
+        ),
         "security_high": sum(1 for s in f.security if s.severity == "high"),
     }
 
@@ -217,7 +226,9 @@ def render_summary(result: RunResult) -> str:
     lines.append(f"- Waste candidates: {counts['waste']}")
     lines.append(f"- End-of-support: {counts['end_of_support']} ended or ending within 12 months")
     lines.append(f"- High-severity security findings: {counts['security_high']}")
-    lines.append(f"- High-impact Advisor recommendations: {counts['advisor_high_impact']}")
+    lines.append(
+        f"- High-impact Advisor recommendations (Cost, Security): {counts['advisor_high_impact']}"
+    )
     lines.append("")
 
     # Cost -------------------------------------------------------------
