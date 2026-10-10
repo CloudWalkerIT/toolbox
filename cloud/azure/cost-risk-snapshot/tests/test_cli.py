@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import pytest
@@ -53,3 +54,17 @@ def test_days_validation(bad) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["--days", bad])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("verbosity", "expected"),
+    [(0, logging.WARNING), (1, logging.WARNING), (2, logging.DEBUG)],
+)
+def test_azure_sdk_logging_quiet_below_vv(verbosity, expected) -> None:
+    azure = logging.getLogger("azure")
+    before = azure.level
+    try:
+        cli._configure_logging(verbosity)
+        assert azure.level == expected
+    finally:
+        azure.setLevel(before)

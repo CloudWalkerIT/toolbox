@@ -95,6 +95,9 @@ def _configure_logging(verbosity: int) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # The Azure SDK logs every request and response header at INFO. Keep it
+    # to warnings unless -vv asks for everything.
+    logging.getLogger("azure").setLevel(logging.DEBUG if verbosity >= 2 else logging.WARNING)
 
 
 def _build_config(args: argparse.Namespace) -> Config:
