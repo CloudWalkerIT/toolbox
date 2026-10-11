@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
 
-from backup_audit.models import RunResult
+from backup_audit.models import UNVERIFIED_MARKER, RunResult
 
 # Last-backup-status classification.
 SUCCESS_LBS = {"Completed", "Healthy", "Passed", "InProgress"}
@@ -327,6 +327,13 @@ def _write_summary_md(result: RunResult, path: Path) -> None:
         lines.append("See `unprotected.csv` for the full list.\n")
         for t, count in by_type.most_common():
             lines.append(f"- {t}: **{count}**")
+        unverified = sum(1 for u in f.unprotected if UNVERIFIED_MARKER in u.reason)
+        if unverified:
+            lines.append(
+                f"\n{unverified} of these are unverified: a vault in the same "
+                "subscription could not be read, so they may be protected. The "
+                "`reason` column in `unprotected.csv` names the vault."
+            )
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")

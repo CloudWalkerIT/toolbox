@@ -3,6 +3,9 @@ unprotected-derivation logic and the SDK-to-model translation helpers."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from backup_audit import capture
 from backup_audit.capture import Inventory, _derive_unprotected, _short_policy_name
 from backup_audit.models import ProtectedItem
 
@@ -190,3 +193,59 @@ def test_sql_on_vm_excluded_when_sql_workload_backed_up() -> None:
     items = [_item("AzureWorkload", "SQLDataBase", vmid)]
     out = _derive_unprotected(inv, items=items, workload_container_vm_ids={vmid.lower()})
     assert out == []
+
+
+VAULT = {"name": "rsv1", "resourceGroup": "rg", "subscriptionId": "sub-a", "location": "eastus"}
+
+
+class _AzureError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(f"({code}) denied")
+        self.error = SimpleNamespace(code=code)
+
+
+def test_fetch_vault_detail_keeps_every_error_with_codes(monkeypatch) -> None:
+    def denied(*a, **k):
+        raise _AzureError("AuthorizationFailed")
+
+    client = SimpleNamespace(
+        backup_policies=SimpleNamespace(list=denied),
+        backup_protected_items=SimpleNamespace(list=denied),
+        backup_protection_containers=SimpleNamespace(list=lambda *a, **k: []),
+    )
+    monkeypatch.setattr(capture, "_backup_client", lambda cred, sub: client)
+    d = capture.fetch_vault_detail(object(), VAULT)
+    assert [(e.source, e.code) for e in d.errors] == [
+        ("vault.rsv1.policies", "AuthorizationFailed"),
+        ("vault.rsv1.items", "AuthorizationFailed"),
+    ]
+    assert d.items_unreadable is True
+
+
+def test_fetch_all_vault_details_survives_a_crashing_vault(monkeypatch) -> None:
+    def fetch(credential, vault):
+        if vault["name"] == "bad":
+            raise KeyError("resourceGroup")
+        return capture.VaultDetail(vault=vault, policies=[], items=[], workload_containers=[])
+
+    monkeypatch.setattr(capture, "fetch_vault_detail", fetch)
+    errors: list = []
+    details = capture.fetch_all_vault_details(object(), [VAULT, {"name": "bad"}], errors)
+    assert len(details) == 2
+    assert [e.source for e in errors] == ["vault.bad"]
+    assert [d.items_unreadable for d in details if d.vault["name"] == "bad"] == [True]
+
+
+def test_unprotected_rows_marked_unverified_when_vault_unreadable() -> None:
+    from backup_audit.models import UNVERIFIED_MARKER, Unprotected
+
+    def row(sub: str) -> Unprotected:
+        return Unprotected("VM", "vm", "rg", sub, "eastus", "", "no IaaS protected item")
+
+    rows = [row("SUB-A"), row("sub-b")]
+    unreadable = capture.VaultDetail(
+        vault=VAULT, policies=[], items=[], workload_containers=[], items_unreadable=True
+    )
+    capture._mark_unverified(rows, [unreadable])
+    assert rows[0].reason == f"no IaaS protected item; {UNVERIFIED_MARKER} vault rsv1"
+    assert rows[1].reason == "no IaaS protected item"

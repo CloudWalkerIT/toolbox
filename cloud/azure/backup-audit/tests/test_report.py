@@ -184,3 +184,13 @@ def test_severity_buckets_are_disjoint(sample_result, tmp_path) -> None:
     overlap = set(id(i) for i in bad) & set(id(i) for i in warn)
     assert not overlap, "items must not appear in both bad and warn buckets"
     assert len(bad) + len(warn) + len(clean) == len(sample_result.findings.protected_items)
+
+
+def test_summary_counts_unverified_unprotected(tmp_path: Path, sample_result) -> None:
+    from backup_audit.models import UNVERIFIED_MARKER
+
+    u = sample_result.findings.unprotected[0]
+    u.reason += f"; {UNVERIFIED_MARKER} vault rsv1"
+    write_run(sample_result, tmp_path)
+    md = (tmp_path / "summary.md").read_text()
+    assert "1 of these are unverified" in md
