@@ -127,13 +127,15 @@ Protected items fall into three buckets:
 
 - **Clean**: last backup succeeded, protection state is normal, health is
   passed. Nothing to action.
-- **Warn (needs human review)**: backups completed with warnings, items
-  intentionally suspended or disabled, initial replication still pending,
-  or Azure has flagged the item as `ActionSuggested`. Could be intentional,
-  could be a problem. An auditor must check.
-- **Bad (definite failure)**: last backup failed or is reported unhealthy,
-  the item is in an `Invalid`/`Error` state, or Azure has flagged it as
-  `ActionRequired`. Investigate.
+- **Warn (needs human review)**: backups completed with warnings,
+  protection suspended, paused, or stopped (`BackupsSuspended`,
+  `ProtectionPaused`, `ProtectionStopped`), initial replication still
+  pending (`IRPending`), or Azure has flagged the item as
+  `ActionSuggested`. Could be intentional, could be a problem. An auditor
+  must check.
+- **Bad (definite failure)**: last backup failed or is reported unhealthy
+  or not reachable, the item is in an `Invalid` or `ProtectionError`
+  state, or Azure has flagged it as `ActionRequired`. Investigate.
 
 Both warn and bad cause the audit to report findings (non-zero exit).
 The summary renders them in separate sections so the distinction is

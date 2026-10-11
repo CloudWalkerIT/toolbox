@@ -6,6 +6,7 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
 from backup_audit.report import ExitCode, classify, write_run
 
 
@@ -115,6 +116,43 @@ def test_classify_backups_suspended_is_warning_not_bad(sample_result) -> None:
     item = sample_result.findings.protected_items[0]
     assert _item_is_bad(item) is False
     assert _item_is_warning(item) is True
+
+
+@pytest.mark.parametrize(
+    ("protection_state", "expected"),
+    [
+        ("Protected", "CLEAN"),
+        ("IRPending", "WARN"),
+        ("BackupsSuspended", "WARN"),
+        ("ProtectionPaused", "WARN"),
+        ("ProtectionStopped", "WARN"),
+        ("ProtectionError", "BAD"),
+        ("Invalid", "BAD"),
+    ],
+)
+def test_every_sdk_protection_state_is_classified(sample_result, protection_state, expected):
+    """Every ProtectionState value the SDK defines lands in the intended bucket."""
+    from backup_audit.report import Severity, severity
+
+    item = sample_result.findings.protected_items[0]
+    item.last_backup_status = "Healthy"
+    item.health_status = ""
+    item.protection_state = protection_state
+    assert severity(item) is Severity[expected]
+
+
+@pytest.mark.parametrize(
+    ("last_backup_status", "expected"),
+    [("Healthy", "CLEAN"), ("IRPending", "WARN"), ("Unhealthy", "BAD"), ("NotReachable", "BAD")],
+)
+def test_workload_health_last_backup_status(sample_result, last_backup_status, expected):
+    from backup_audit.report import Severity, severity
+
+    item = sample_result.findings.protected_items[0]
+    item.protection_state = "Protected"
+    item.health_status = ""
+    item.last_backup_status = last_backup_status
+    assert severity(item) is Severity[expected]
 
 
 def test_classify_failed_is_bad_not_warning(sample_result) -> None:
