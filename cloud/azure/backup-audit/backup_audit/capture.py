@@ -421,6 +421,20 @@ def _derive_unprotected(
 # --------------------------------------------------------------------------
 
 
+def _mark_policy_use(policies: list[Policy], items: list[ProtectedItem]) -> None:
+    """Set has_protected_items on each policy. Policies are keyed by the full
+    vault identity, since vault names repeat across subscriptions and
+    resource groups."""
+    used = {
+        (i.subscription_id.lower(), i.resource_group.lower(), i.vault.lower(), i.policy)
+        for i in items
+        if i.policy
+    }
+    for p in policies:
+        key = (p.subscription_id.lower(), p.resource_group.lower(), p.vault.lower(), p.name)
+        p.has_protected_items = key in used
+
+
 def capture_for_credential(
     spec: CredentialSpec,
 ) -> tuple[Findings, list[CaptureError], list[str]]:
@@ -460,24 +474,19 @@ def capture_for_credential(
         for v in inv.vaults
     ]
 
-    policy_use: dict[tuple[str, str], bool] = {}
     workload_container_vm_ids: set[str] = set()
 
     for d in details:
         for p in d.policies:
             findings.policies.append(_policy_from_sdk(p, d.vault))
         for it in d.items:
-            pi = _item_from_sdk(it, d.vault)
-            findings.protected_items.append(pi)
-            if pi.policy:
-                policy_use[(pi.vault, pi.policy)] = True
+            findings.protected_items.append(_item_from_sdk(it, d.vault))
         for c in d.workload_containers:
             src = getattr(getattr(c, "properties", None), "source_resource_id", None)
             if src:
                 workload_container_vm_ids.add(src.lower())
 
-    for p in findings.policies:
-        p.has_protected_items = policy_use.get((p.vault, p.name), False)
+    _mark_policy_use(findings.policies, findings.protected_items)
 
     findings.unprotected = _derive_unprotected(
         inv, findings.protected_items, workload_container_vm_ids

@@ -51,8 +51,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-output",
         action="store_true",
-        help="Run the capture but write no files. Useful for embedded "
-        "use or for piping data.json from stdout (not yet implemented).",
+        help="Run the capture but write no files. The exit code and a one-line "
+        "summary on stderr still report the result.",
     )
     p.add_argument(
         "--exit-zero",

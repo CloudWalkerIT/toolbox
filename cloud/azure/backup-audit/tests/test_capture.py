@@ -190,3 +190,35 @@ def test_sql_on_vm_excluded_when_sql_workload_backed_up() -> None:
     items = [_item("AzureWorkload", "SQLDataBase", vmid)]
     out = _derive_unprotected(inv, items=items, workload_container_vm_ids={vmid.lower()})
     assert out == []
+
+
+def test_policy_use_keyed_by_full_vault_identity() -> None:
+    """Vaults with the same name in different subscriptions must not mark
+    each other's policies as used."""
+    from backup_audit.capture import _mark_policy_use
+    from backup_audit.models import Policy
+
+    def policy(sub: str) -> Policy:
+        return Policy(
+            vault="rsv",
+            resource_group="rg",
+            subscription_id=sub,
+            name="daily",
+            backup_management_type="AzureIaasVM",
+            workload_type="VM",
+            policy_type="V2",
+            schedule_frequency="Daily",
+            schedule_times=[],
+            schedule_days=[],
+            retention={},
+            instant_restore_days=None,
+            timezone=None,
+            sub_policies=[],
+        )
+
+    used, unused = policy("SUB"), policy("other-sub")
+    item = _item("AzureIaasVM", "VM", _vm_id("vm1"))
+    item.policy = "daily"
+    _mark_policy_use([used, unused], [item])
+    assert used.has_protected_items is True
+    assert unused.has_protected_items is False
