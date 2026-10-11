@@ -12,12 +12,20 @@ doesn't suppress the rest of the snapshot.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
+from statistics import median
 from typing import Any
 
 from cost_risk_snapshot.config import CredentialSpec
-from cost_risk_snapshot.cost import capture_cost_for_subscription, error_code
+from cost_risk_snapshot.cost import (
+    WASTE_COST_DAYS,
+    DailyCost,
+    capture_cost_for_subscription,
+    capture_daily_resource_costs,
+    error_code,
+)
 from cost_risk_snapshot.lifecycle import derive_end_of_support
 from cost_risk_snapshot.models import (
     AdvisorRecommendation,
@@ -72,7 +80,9 @@ resources
 resources
 | where type =~ 'microsoft.compute/virtualmachines'
 | where tostring(properties.extended.instanceView.powerState.code) =~ 'PowerState/deallocated'
-| project {_BASE}, sku = tostring(properties.hardwareProfile.vmSize)
+| project {_BASE}, sku = tostring(properties.hardwareProfile.vmSize),
+    osDiskId = tostring(properties.storageProfile.osDisk.managedDisk.id),
+    dataDisks = properties.storageProfile.dataDisks
 """,
         "VM is deallocated; its disks (and any static public IP) are still billed",
     ),
@@ -81,7 +91,9 @@ resources
 resources
 | where type =~ 'microsoft.compute/virtualmachines'
 | where tostring(properties.extended.instanceView.powerState.code) =~ 'PowerState/stopped'
-| project {_BASE}, sku = tostring(properties.hardwareProfile.vmSize)
+| project {_BASE}, sku = tostring(properties.hardwareProfile.vmSize),
+    osDiskId = tostring(properties.storageProfile.osDisk.managedDisk.id),
+    dataDisks = properties.storageProfile.dataDisks
 """,
         "VM is stopped but not deallocated; compute is still billed",
     ),
@@ -130,6 +142,21 @@ resources
 """,
         "load balancer has no backend pool members",
     ),
+}
+
+WASTE_ACTIONS: dict[str, str] = {
+    "unattached_disk": "Confirm nothing needs the data (snapshot it if unsure), then delete "
+    "the disk.",
+    "unattached_public_ip": "Delete the IP unless the address is pinned in DNS or a partner "
+    "allow-list.",
+    "deallocated_vm": "If the VM is retired, delete it with its disks. If it is kept for later, "
+    "snapshot the disks and delete them, or move them to Standard HDD.",
+    "stopped_vm": "Deallocate it (Stop in the portal) to end compute billing, or delete it.",
+    "orphaned_nic": "Delete the NIC. It costs nothing, but it holds a private IP and clutters "
+    "the network.",
+    "old_snapshot": "Delete it unless a retention requirement covers it.",
+    "empty_app_service_plan": "Delete the plan, or scale it to Free if it is kept for new apps.",
+    "empty_load_balancer": "Delete the load balancer if nothing is planned behind it.",
 }
 
 ARG_ADVISOR = """
@@ -282,9 +309,61 @@ def map_waste(category: str, reason: str, rows: list[dict]) -> list[Waste]:
             location=r.get("location", ""),
             sku=(r.get("sku") or "").strip() or None,
             reason=reason,
+            recommended_action=WASTE_ACTIONS.get(category, ""),
         )
         for r in rows
     ]
+
+
+def waste_cost_ids(category: str, row: dict) -> list[str]:
+    """Resource IDs whose billing makes up a waste candidate's cost.
+
+    A deallocated VM bills only its disks, so the VM's own compute history is
+    left out. A stopped VM still bills compute, so it counts with its disks.
+    """
+    rid = str(row.get("id") or "").lower()
+    if category not in ("deallocated_vm", "stopped_vm"):
+        return [rid]
+    disks = [row.get("osDiskId")]
+    for d in row.get("dataDisks") or []:
+        if isinstance(d, dict):
+            disks.append((d.get("managedDisk") or {}).get("id"))
+    disk_ids = [str(d).lower() for d in disks if d]
+    return disk_ids if category == "deallocated_vm" else [rid, *disk_ids]
+
+
+def estimate_monthly_cost(daily: list[DailyCost], ids: list[str]) -> tuple[float, str | None]:
+    """Median non-zero daily cost across `ids`, times 30.
+
+    The median keeps a resource younger than the window, or a day not yet
+    fully billed, from skewing the estimate. No billed days means 0.
+    """
+    wanted = set(ids)
+    per_day: dict[str, float] = {}
+    currency = None
+    for d in daily:
+        if d.resource_id in wanted:
+            per_day[d.day] = per_day.get(d.day, 0.0) + d.cost
+            currency = d.currency or currency
+    billed = [c for c in per_day.values() if c > 0]
+    if not billed:
+        return 0.0, currency
+    return round(median(billed) * 30, 2), currency
+
+
+def apply_waste_costs(
+    waste: list[Waste],
+    cost_ids: dict[str, list[str]],
+    daily: list[DailyCost],
+    failed: set[str],
+) -> None:
+    """Fill est_monthly_cost and currency on each waste row in place. Rows
+    whose cost query failed keep est_monthly_cost as None."""
+    for w in waste:
+        ids = cost_ids.get(w.resource_id.lower(), [w.resource_id.lower()])
+        if failed.intersection(ids):
+            continue
+        w.est_monthly_cost, w.currency = estimate_monthly_cost(daily, ids)
 
 
 def _float_or_none(v: Any) -> float | None:
@@ -511,6 +590,45 @@ def _capture_cost(
             errors.extend(errs)
 
 
+def _capture_waste_costs(
+    credential: Any,
+    waste: list[Waste],
+    cost_ids: dict[str, list[str]],
+    today: date,
+    errors: list[CaptureError],
+) -> None:
+    if not waste:
+        return
+    try:
+        from azure.mgmt.costmanagement import CostManagementClient
+
+        client = CostManagementClient(credential)
+    except Exception as e:  # noqa: BLE001
+        errors.append(CaptureError(source="cost.client", message=str(e)))
+        return
+
+    ids_by_sub: dict[str, set[str]] = defaultdict(set)
+    for w in waste:
+        ids_by_sub[w.subscription_id].update(
+            cost_ids.get(w.resource_id.lower(), [w.resource_id.lower()])
+        )
+
+    start, end = cost_window(WASTE_COST_DAYS, today)
+    daily: list[DailyCost] = []
+    failed: set[str] = set()
+    with ThreadPoolExecutor(max_workers=COST_FANOUT) as pool:
+        futures = [
+            pool.submit(capture_daily_resource_costs, client, sub, sorted(ids), start, end)
+            for sub, ids in ids_by_sub.items()
+        ]
+        for fut in as_completed(futures):
+            d, f, errs = fut.result()
+            daily.extend(d)
+            failed.update(f)
+            errors.extend(errs)
+    apply_waste_costs(waste, cost_ids, daily, failed)
+
+
 def capture_for_credential(
     spec: CredentialSpec, days: int, today: date
 ) -> tuple[Findings, list[CaptureError], list[str]]:
@@ -558,8 +676,12 @@ def capture_for_credential(
     findings = Findings()
     findings.inventory_counts = map_inventory(safe("inventory", ARG_INVENTORY))
 
+    cost_ids: dict[str, list[str]] = {}
     for category, (kql, reason) in ARG_WASTE.items():
-        findings.waste.extend(map_waste(category, reason, safe(f"waste.{category}", kql)))
+        rows = safe(f"waste.{category}", kql)
+        findings.waste.extend(map_waste(category, reason, rows))
+        for r in rows:
+            cost_ids[str(r.get("id") or "").lower()] = waste_cost_ids(category, r)
 
     findings.advisor = map_advisor(safe("advisor", ARG_ADVISOR))
 
@@ -579,5 +701,6 @@ def capture_for_credential(
 
     start, end = cost_window(days, today)
     _capture_cost(credential, subs, start, end, findings, errors)
+    _capture_waste_costs(credential, findings.waste, cost_ids, today, errors)
 
     return findings, errors, subs

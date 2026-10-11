@@ -8,10 +8,15 @@ from types import SimpleNamespace
 from cost_risk_snapshot.cost import (
     MAX_ATTEMPTS,
     MAX_RETRY_WAIT,
+    RESOURCE_ID_CHUNK,
+    DailyCost,
     build_query,
+    build_resource_daily_query,
     capture_cost_for_subscription,
+    capture_daily_resource_costs,
     map_by_resource_group,
     map_by_service,
+    map_daily_resource_costs,
     map_monthly,
     query_with_retry,
     result_rows,
@@ -164,3 +169,54 @@ def test_capture_cost_records_error_after_retries_exhausted() -> None:
         ("cost.s1.by_service", "429"),
         ("cost.s1.by_resource_group", "429"),
     ]
+
+
+def test_resource_daily_query_filters_to_ids() -> None:
+    q = build_resource_daily_query(date(2026, 9, 10), date(2026, 10, 9), ["/a", "/b"])
+    assert q["dataset"]["granularity"] == "Daily"
+    assert q["dataset"]["grouping"] == [{"type": "Dimension", "name": "ResourceId"}]
+    assert q["dataset"]["filter"] == {
+        "dimensions": {"name": "ResourceId", "operator": "In", "values": ["/a", "/b"]}
+    }
+
+
+def test_map_daily_resource_costs() -> None:
+    res = _result(
+        ["Cost", "UsageDate", "ResourceId", "Currency"],
+        [
+            [0.12, 20261001, "/SUBSCRIPTIONS/S1/DISKS/D1", "USD"],
+            [0.5, "2026-10-02T00:00:00", "/x", "USD"],
+        ],
+    )
+    assert map_daily_resource_costs(result_rows(res)) == [
+        DailyCost("/subscriptions/s1/disks/d1", "2026-10-01", 0.12, "USD"),
+        DailyCost("/x", "2026-10-02", 0.5, "USD"),
+    ]
+
+
+def test_capture_daily_resource_costs_chunks_and_records_failures() -> None:
+    ids = [f"/R{i:02d}" for i in range(RESOURCE_ID_CHUNK + 5)]
+    bodies = []
+
+    def usage(scope, body):
+        bodies.append(body)
+        values = body["dataset"]["filter"]["dimensions"]["values"]
+        if len(bodies) == 2:
+            raise ValueError("bad request")
+        return _result(
+            ["Cost", "UsageDate", "ResourceId", "Currency"],
+            [[1.0, 20261001, v, "USD"] for v in values],
+        )
+
+    client = SimpleNamespace(query=SimpleNamespace(usage=usage))
+    daily, failed, errors = capture_daily_resource_costs(
+        client, SUB, ids, date(2026, 9, 10), date(2026, 10, 9)
+    )
+    assert [len(b["dataset"]["filter"]["dimensions"]["values"]) for b in bodies] == [
+        RESOURCE_ID_CHUNK,
+        5,
+    ]
+    # IDs are lower-cased before querying.
+    assert len(daily) == RESOURCE_ID_CHUNK and daily[0].resource_id == "/r00"
+    assert failed == {f"/r{i:02d}" for i in range(RESOURCE_ID_CHUNK, RESOURCE_ID_CHUNK + 5)}
+    assert [e.source for e in errors] == ["cost.s1.waste"]

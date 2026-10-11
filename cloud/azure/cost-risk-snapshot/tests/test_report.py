@@ -51,6 +51,29 @@ def test_waste_csv_rows(tmp_path: Path, concerning_result) -> None:
     assert len(rows) == 1
     assert rows[0]["category"] == "unattached_disk"
     assert rows[0]["est_monthly_cost"] == ""
+    assert list(rows[0])[-3:] == ["est_monthly_cost", "currency", "recommended_action"]
+
+
+def test_summary_cleanup_list(concerning_result) -> None:
+    from dataclasses import replace
+
+    f = concerning_result.findings
+    disk = replace(f.waste[0], est_monthly_cost=9.6, currency="USD", recommended_action="Delete.")
+    nic = replace(
+        f.waste[0], category="orphaned_nic", name="nic1", est_monthly_cost=0.0, currency=None
+    )
+    unknown = replace(f.waste[0], category="deallocated_vm", name="vm1", est_monthly_cost=None)
+    f.waste[:] = [nic, unknown, disk]
+    md = render_summary(concerning_result)
+    assert "Waste candidates: 3 (est. 9.60 USD/month to clean up)" in md
+    assert "| unattached_disk | 1 | 9.60 USD |" in md
+    assert "| orphaned_nic | 1 | - |" in md
+    cleanup = md.split("### Cleanup list")[1]
+    # Costliest first; unknown cost shows n/a.
+    assert cleanup.index("`rg-prod/d1`") < cleanup.index("`rg-prod/nic1`")
+    assert "| `rg-prod/d1` | unattached_disk | 9.60 USD | Delete. |" in cleanup
+    assert "| `rg-prod/vm1` | deallocated_vm | n/a |" in cleanup
+    assert "| `rg-prod/nic1` | orphaned_nic | 0.00 |" in cleanup
 
 
 def test_cost_headlines_last_month_and_run_rate(clean_result) -> None:
