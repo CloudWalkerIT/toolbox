@@ -120,10 +120,15 @@ def test_classify_each_concerning_signal(clean_result) -> None:
 
     f = clean_result.findings
 
-    # A high-impact Advisor recommendation alone is concerning.
-    f.advisor[0] = replace(f.advisor[0], impact="High")
-    assert classify(clean_result) == ExitCode.FINDINGS
-    f.advisor[0] = replace(f.advisor[0], impact="Medium")
+    # A high-impact Cost or Security Advisor recommendation alone is concerning.
+    for category in ("Cost", "Security"):
+        f.advisor[0] = replace(f.advisor[0], category=category, impact="High")
+        assert classify(clean_result) == ExitCode.FINDINGS
+    # High impact in other categories is generic best practice, not concerning.
+    for category in ("HighAvailability", "OperationalExcellence", "Performance"):
+        f.advisor[0] = replace(f.advisor[0], category=category, impact="High")
+        assert classify(clean_result) == ExitCode.CLEAN
+    f.advisor[0] = replace(f.advisor[0], category="Cost", impact="Medium")
 
     # An end-of-support row ending within 12 months alone is concerning.
     f.end_of_support[0] = replace(f.end_of_support[0], status="ends_within_12_months")

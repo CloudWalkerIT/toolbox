@@ -197,7 +197,8 @@ A snapshot is **concerning** when any of these hold:
 
 - any waste candidate exists;
 - any end-of-support row has status `ended` or `ends_within_12_months`;
-- any Advisor recommendation has `High` impact;
+- any Cost or Security Advisor recommendation has `High` impact (High
+  impact in other categories is reported but not concerning);
 - any security finding has `high` severity.
 
 Pass `--exit-zero` to suppress non-zero exits when running from a pipeline
@@ -227,4 +228,3 @@ result = run(Config.default(), days=90)
 problem per check (unattached disk and IP, orphaned NIC, deallocated Windows
 Server 2016 VM, RDP open to the internet, loose storage and Key Vault settings).
 Apply it to a throwaway subscription to exercise the tool against real APIs.
-
