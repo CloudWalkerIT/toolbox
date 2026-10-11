@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from backup_audit.config import CredentialSpec
 from backup_audit.models import (
+    UNVERIFIED_MARKER,
     CaptureError,
     Findings,
     Policy,
@@ -128,7 +129,7 @@ def capture_inventory(
             return query_arg(credential, subscriptions, kql)
         except Exception as e:  # noqa: BLE001
             log.warning("ARG query %s failed: %s", query_name, e)
-            errors.append(CaptureError(source=f"arg.{query_name}", message=str(e)))
+            errors.append(_error(f"arg.{query_name}", e))
             return []
 
     inv.vaults = safe("vaults", ARG_VAULTS)
@@ -201,7 +202,23 @@ class VaultDetail:
     policies: list[Any]
     items: list[Any]
     workload_containers: list[Any]
-    error: CaptureError | None = None
+    errors: list[CaptureError] = field(default_factory=list)
+    # True when the vault's protected items could not be read, so coverage in
+    # its subscription is unknown.
+    items_unreadable: bool = False
+
+
+def error_code(e: Exception) -> str | None:
+    """Azure error code (e.g. AuthorizationFailed), else the HTTP status."""
+    code = getattr(getattr(e, "error", None), "code", None)
+    if code:
+        return str(code)
+    status = getattr(e, "status_code", None)
+    return str(status) if status else None
+
+
+def _error(source: str, e: Exception) -> CaptureError:
+    return CaptureError(source=source, message=str(e), code=error_code(e))
 
 
 def _backup_client(credential: Any, subscription_id: str) -> Any:
@@ -221,8 +238,8 @@ def _backup_client(credential: Any, subscription_id: str) -> Any:
 def fetch_vault_detail(credential: Any, vault: dict) -> VaultDetail:
     """Fetch policies, protected items, and workload containers for one vault.
 
-    Returns VaultDetail with `error` populated when any sub-call fails. The
-    individual lists may be partially populated on failure.
+    Each failing sub-call adds a CaptureError to `errors`; the individual
+    lists may be partially populated on failure.
     """
     detail = VaultDetail(vault=vault, policies=[], items=[], workload_containers=[])
     sub_id = vault["subscriptionId"]
@@ -232,18 +249,20 @@ def fetch_vault_detail(credential: Any, vault: dict) -> VaultDetail:
     try:
         client = _backup_client(credential, sub_id)
     except Exception as e:  # noqa: BLE001
-        detail.error = CaptureError(source=f"vault.{name}.client", message=str(e))
+        detail.errors.append(_error(f"vault.{name}.client", e))
+        detail.items_unreadable = True
         return detail
 
     try:
         detail.policies = list(client.backup_policies.list(name, rg))
     except Exception as e:  # noqa: BLE001
-        detail.error = CaptureError(source=f"vault.{name}.policies", message=str(e))
+        detail.errors.append(_error(f"vault.{name}.policies", e))
 
     try:
         detail.items = list(client.backup_protected_items.list(name, rg))
     except Exception as e:  # noqa: BLE001
-        detail.error = CaptureError(source=f"vault.{name}.items", message=str(e))
+        detail.errors.append(_error(f"vault.{name}.items", e))
+        detail.items_unreadable = True
 
     # Workload containers are filtered for AzureWorkload (SQL on VM, SAP HANA
     # etc.). Used to map SQL DB items back to their host VM.
@@ -254,7 +273,7 @@ def fetch_vault_detail(credential: Any, vault: dict) -> VaultDetail:
             )
         )
     except Exception as e:  # noqa: BLE001
-        detail.error = CaptureError(source=f"vault.{name}.workload_containers", message=str(e))
+        detail.errors.append(_error(f"vault.{name}.workload_containers", e))
 
     return detail
 
@@ -272,9 +291,15 @@ def fetch_all_vault_details(
     with ThreadPoolExecutor(max_workers=VAULT_FANOUT) as pool:
         futures = {pool.submit(fetch_vault_detail, credential, v): v for v in vaults}
         for fut in as_completed(futures):
-            d = fut.result()
-            if d.error:
-                errors.append(d.error)
+            vault = futures[fut]
+            try:
+                d = fut.result()
+            except Exception as e:  # noqa: BLE001
+                # A malformed vault row must not abort the whole credential.
+                d = VaultDetail(vault=vault, policies=[], items=[], workload_containers=[])
+                d.errors.append(_error(f"vault.{vault.get('name', '?')}", e))
+                d.items_unreadable = True
+            errors.extend(d.errors)
             details.append(d)
     return details
 
@@ -517,12 +542,7 @@ def capture_for_credential(
         try:
             subs = list_subscriptions(credential)
         except Exception as e:  # noqa: BLE001
-            errors.append(
-                CaptureError(
-                    source=f"credential.{spec.name}.list_subscriptions",
-                    message=str(e),
-                )
-            )
+            errors.append(_error(f"credential.{spec.name}.list_subscriptions", e))
             return Findings(), errors, []
 
     inv = capture_inventory(credential, subs, errors)
@@ -561,5 +581,21 @@ def capture_for_credential(
     findings.unprotected = _derive_unprotected(
         inv, findings.protected_items, workload_container_vm_ids
     )
+    _mark_unverified(findings.unprotected, details)
 
     return findings, errors, subs
+
+
+def _mark_unverified(unprotected: list[Unprotected], details: list[VaultDetail]) -> None:
+    """Flag unprotected rows whose subscription has a vault with unreadable
+    protected items. Azure Backup protects resources from a vault in the
+    same subscription, so any of those rows may actually be protected."""
+    unreadable: dict[str, list[str]] = {}
+    for d in details:
+        if d.items_unreadable:
+            sub = str(d.vault.get("subscriptionId", "")).lower()
+            unreadable.setdefault(sub, []).append(str(d.vault.get("name", "?")))
+    for u in unprotected:
+        vaults = unreadable.get(u.subscription_id.lower())
+        if vaults:
+            u.reason += f"; {UNVERIFIED_MARKER} vault " + ", ".join(sorted(vaults))
