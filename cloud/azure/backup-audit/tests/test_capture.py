@@ -3,6 +3,9 @@ unprotected-derivation logic and the SDK-to-model translation helpers."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from backup_audit import capture
 from backup_audit.capture import Inventory, _derive_unprotected, _short_policy_name
 from backup_audit.models import ProtectedItem
 
@@ -115,27 +118,106 @@ def test_protected_vm_is_excluded() -> None:
     assert out == []
 
 
+def _account_id(account: str) -> str:
+    return (
+        f"/subscriptions/{SUB}/resourceGroups/{RG}/providers/"
+        f"Microsoft.Storage/storageAccounts/{account}"
+    )
+
+
+def _share_row(account: str, share: str) -> dict:
+    return {
+        "id": _share_id(account, share),
+        "name": share,
+        "resourceGroup": "rg",
+        "subscriptionId": "s",
+        "location": "eastus",
+        "storageAccountId": _account_id(account),
+        "accessTier": "TransactionOptimized",
+        "shareQuota": 100,
+        "enabledProtocols": "SMB",
+    }
+
+
 def test_unprotected_file_share() -> None:
+    inv = Inventory(vaults=[], vms=[], file_shares=[_share_row("sa", "share1")], sql_vms=[])
+    out = _derive_unprotected(inv, items=[], workload_container_vm_ids=set())
+    assert len(out) == 1
+    assert out[0].resource_type == "FileShare"
+    assert out[0].name == "sa/share1"
+    assert out[0].location == "eastus"
+    assert "tier=TransactionOptimized" in out[0].detail
+
+
+def test_protected_file_share_matched_by_account_and_name() -> None:
+    """Azure reports a file share item's source as the storage account and
+    its friendly name as the share name. Shares with the same name in other
+    accounts, and other shares in the same account, stay unprotected."""
     inv = Inventory(
         vaults=[],
         vms=[],
         file_shares=[
-            {
-                "id": _share_id("sa", "share1"),
-                "name": "share1",
-                "resourceGroup": "rg",
-                "subscriptionId": "s",
-                "accessTier": "TransactionOptimized",
-                "shareQuota": 100,
-                "enabledProtocols": "SMB",
-            }
+            _share_row("sa", "Share1"),
+            _share_row("sa", "share2"),
+            _share_row("other", "share1"),
         ],
         sql_vms=[],
     )
-    out = _derive_unprotected(inv, items=[], workload_container_vm_ids=set())
-    assert len(out) == 1
-    assert out[0].resource_type == "FileShare"
-    assert "tier=TransactionOptimized" in out[0].detail
+    items = [_item("AzureStorage", "AzureFileShare", _account_id("SA"), name="share1")]
+    out = _derive_unprotected(inv, items=items, workload_container_vm_ids=set())
+    assert sorted(u.name for u in out) == ["other/share1", "sa/share2"]
+
+
+def test_protected_file_share_with_share_id_source() -> None:
+    inv = Inventory(vaults=[], vms=[], file_shares=[_share_row("sa", "share1")], sql_vms=[])
+    items = [_item("AzureStorage", "AzureFileShare", _share_id("sa", "share1"), name="ignored")]
+    assert _derive_unprotected(inv, items=items, workload_container_vm_ids=set()) == []
+
+
+def test_list_all_file_shares_maps_rows_and_records_failures(monkeypatch) -> None:
+    def fake_client(credential, subscription_id):
+        def list_shares(rg, account):
+            if account == "denied":
+                raise RuntimeError("AuthorizationFailed")
+            return [
+                SimpleNamespace(
+                    id=_share_id(account, "share1"),
+                    name="share1",
+                    access_tier="Hot",
+                    share_quota=5120,
+                    enabled_protocols=None,
+                )
+            ]
+
+        return SimpleNamespace(file_shares=SimpleNamespace(list=list_shares))
+
+    monkeypatch.setattr(capture, "_storage_client", fake_client)
+    accounts = [
+        {
+            "id": _account_id(a),
+            "name": a,
+            "resourceGroup": RG,
+            "subscriptionId": SUB,
+            "location": "eastus",
+        }
+        for a in ("sa", "denied")
+    ]
+    errors: list = []
+    shares = capture.list_all_file_shares(object(), accounts, errors)
+    assert shares == [
+        {
+            "id": _share_id("sa", "share1"),
+            "name": "share1",
+            "resourceGroup": RG,
+            "subscriptionId": SUB,
+            "location": "eastus",
+            "storageAccountId": _account_id("sa"),
+            "accessTier": "Hot",
+            "shareQuota": 5120,
+            "enabledProtocols": "",
+        }
+    ]
+    assert [e.source for e in errors] == ["storage.denied.file_shares"]
 
 
 def _sql_vm_inventory_row(name: str, vmid: str) -> dict:

@@ -22,9 +22,13 @@ Out of scope for v0.1:
 ## How it works
 
 1. Inventory via Azure Resource Graph. One ARG query each for vaults,
-   VMs, file shares, and SQL-on-VM resources. ARG handles cross-subscription
-   queries within a tenant in a single call, so a single credential covers
-   everything it can see.
+   VMs, storage accounts, and SQL-on-VM resources. ARG handles
+   cross-subscription queries within a tenant in a single call, so a single
+   credential covers everything it can see. ARG does not index file shares,
+   so each storage account that can hold them (StorageV2, Storage,
+   FileStorage) has its shares listed through the storage management API.
+   An account whose shares can't be listed produces a `CaptureError`, and
+   its shares are left out rather than reported as unprotected.
 2. Per-vault detail via the recovery services backup management SDK. For
    each vault we list policies, protected items, and workload containers
    in parallel.
