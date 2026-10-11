@@ -143,3 +143,18 @@ def test_summary_says_secure_score_unavailable(clean_result) -> None:
     clean_result.findings.secure_scores = []
     text = render_summary(clean_result)
     assert "Secure score: not available" in text
+
+
+def test_new_run_dir_never_reuses_a_directory(tmp_path: Path, monkeypatch) -> None:
+    """Two runs in the same second must not share a run directory."""
+    from cost_risk_snapshot import report
+
+    ids = iter(["20261011T120000Z", "20261011T120000Z", "20261011T120001Z"])
+    monkeypatch.setattr(report, "now_run_id", lambda: next(ids))
+    waits: list[float] = []
+
+    first = report.new_run_dir(tmp_path / "outputs", sleep=waits.append)
+    second = report.new_run_dir(tmp_path / "outputs", sleep=waits.append)
+    assert first.name == "20261011T120000Z"
+    assert second.name == "20261011T120001Z"
+    assert len(waits) == 1

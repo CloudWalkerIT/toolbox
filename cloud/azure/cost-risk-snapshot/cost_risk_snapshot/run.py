@@ -14,7 +14,7 @@ from pathlib import Path
 from cost_risk_snapshot.capture import capture_for_credential, cost_window
 from cost_risk_snapshot.config import Config
 from cost_risk_snapshot.models import CaptureError, Findings, RunResult, Scope
-from cost_risk_snapshot.report import ExitCode, now_run_id, write_run
+from cost_risk_snapshot.report import ExitCode, new_run_dir, write_run
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def run(
     )
 
     if output_dir is not None:
-        run_dir = Path(output_dir) / now_run_id()
+        run_dir = new_run_dir(Path(output_dir))
         write_run(result, run_dir)
         log.info("wrote run to %s", run_dir)
 

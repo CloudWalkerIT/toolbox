@@ -10,7 +10,9 @@ from __future__ import annotations
 import calendar
 import csv
 import json
+import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, date, datetime, timedelta
 from enum import IntEnum
@@ -336,3 +338,20 @@ def render_summary(result: RunResult) -> str:
 
 def now_run_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def new_run_dir(parent: Path, sleep: Callable[[float], None] = time.sleep) -> Path:
+    """Create a fresh run directory under parent.
+
+    The output contract forbids writing into an existing run directory. Run
+    IDs have one-second resolution, so if another run already took this
+    second, wait for the next one.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        run_dir = parent / now_run_id()
+        try:
+            run_dir.mkdir()
+            return run_dir
+        except FileExistsError:
+            sleep(0.25)
