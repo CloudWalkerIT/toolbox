@@ -3,9 +3,10 @@
 The capture has two phases:
 
 1. Inventory via Azure Resource Graph. One ARG query each for vaults, VMs,
-   storage file shares, and SQL-on-VM resources, scoped to the subscriptions
+   storage accounts, and SQL-on-VM resources, scoped to the subscriptions
    the credential covers. ARG transparently handles cross-subscription
-   queries within a tenant.
+   queries within a tenant. ARG does not index file shares, so they are
+   listed per storage account through the storage management API.
 
 2. Per-vault detail via the recovery services backup management SDK. For
    each vault we list backup policies, protected items, and workload
@@ -58,13 +59,14 @@ resources
           vmSize = tostring(properties.hardwareProfile.vmSize)
 """
 
-ARG_FILE_SHARES = """
+# Resource Graph does not index file shares, so shares are listed per storage
+# account through the storage management API. Only these account kinds can
+# hold file shares.
+ARG_STORAGE_ACCOUNTS = """
 resources
-| where type =~ 'microsoft.storage/storageaccounts/fileservices/shares'
-| project id, name, resourceGroup, subscriptionId,
-          accessTier = tostring(properties.accessTier),
-          shareQuota = toint(properties.shareQuota),
-          enabledProtocols = tostring(properties.enabledProtocols)
+| where type =~ 'microsoft.storage/storageaccounts'
+| where kind in~ ('StorageV2', 'Storage', 'FileStorage')
+| project id, name, resourceGroup, subscriptionId, location
 """
 
 ARG_SQL_VMS = """
@@ -132,9 +134,61 @@ def capture_inventory(
 
     inv.vaults = safe("vaults", ARG_VAULTS)
     inv.vms = safe("vms", ARG_VMS)
-    inv.file_shares = safe("file_shares", ARG_FILE_SHARES)
+    accounts = safe("storage_accounts", ARG_STORAGE_ACCOUNTS)
+    inv.file_shares = list_all_file_shares(credential, accounts, errors)
     inv.sql_vms = safe("sql_vms", ARG_SQL_VMS)
     return inv
+
+
+def _storage_client(credential: Any, subscription_id: str) -> Any:
+    from azure.mgmt.storage import StorageManagementClient
+
+    return StorageManagementClient(credential, subscription_id)
+
+
+def list_file_shares(credential: Any, account: dict) -> list[dict]:
+    """List one storage account's file shares as inventory rows."""
+    client = _storage_client(credential, account["subscriptionId"])
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "resourceGroup": account["resourceGroup"],
+            "subscriptionId": account["subscriptionId"],
+            "location": account.get("location", ""),
+            "storageAccountId": account["id"],
+            "accessTier": getattr(s, "access_tier", None) or "",
+            "shareQuota": getattr(s, "share_quota", None),
+            "enabledProtocols": getattr(s, "enabled_protocols", None) or "",
+        }
+        for s in client.file_shares.list(account["resourceGroup"], account["name"])
+    ]
+
+
+def list_all_file_shares(
+    credential: Any,
+    accounts: list[dict],
+    errors: list[CaptureError],
+) -> list[dict]:
+    """List file shares across storage accounts in parallel. An account whose
+    shares can't be listed becomes a CaptureError; its shares are left out
+    rather than reported as unprotected."""
+    shares: list[dict] = []
+    if not accounts:
+        return shares
+
+    with ThreadPoolExecutor(max_workers=VAULT_FANOUT) as pool:
+        futures = {pool.submit(list_file_shares, credential, a): a for a in accounts}
+        for fut in as_completed(futures):
+            account = futures[fut]
+            try:
+                shares.extend(fut.result())
+            except Exception as e:  # noqa: BLE001
+                log.warning("listing file shares in %s failed: %s", account["name"], e)
+                errors.append(
+                    CaptureError(source=f"storage.{account['name']}.file_shares", message=str(e))
+                )
+    return shares
 
 
 # --------------------------------------------------------------------------
@@ -312,6 +366,14 @@ def _short_policy_name(policy_id: str | None) -> str:
     return policy_id.rstrip("/").rsplit("/", 1)[-1]
 
 
+def _iso(value: Any) -> str:
+    """ISO 8601 for datetimes, as the output contract requires; str() of a
+    datetime gives a space-separated form instead."""
+    if not value:
+        return ""
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _item_from_sdk(it: Any, vault: dict) -> ProtectedItem:
     props = getattr(it, "properties", None)
     err = getattr(props, "last_backup_error_detail", None) if props else None
@@ -331,7 +393,7 @@ def _item_from_sdk(it: Any, vault: dict) -> ProtectedItem:
             or ""
         ),
         policy=_short_policy_name(getattr(props, "policy_id", None)),
-        last_backup_time=str(getattr(props, "last_backup_time", "") or ""),
+        last_backup_time=_iso(getattr(props, "last_backup_time", None)),
         last_backup_status=getattr(props, "last_backup_status", None),
         protection_state=getattr(props, "protection_state", None)
         or getattr(props, "protection_status", None),
@@ -346,6 +408,23 @@ def _item_from_sdk(it: Any, vault: dict) -> ProtectedItem:
 # --------------------------------------------------------------------------
 
 
+_SHARE_PATH = "/fileservices/default/shares/"
+
+
+def _share_key(item: ProtectedItem) -> tuple[str, str]:
+    """(storage account id, share name) for an AzureFileShare item, lower-cased.
+
+    Azure reports the storage account as the item's source resource and the
+    share name as its friendly name. A share resource ID is split into the
+    same two parts in case a source ever points at the share itself.
+    """
+    src = item.source_resource_id.lower()
+    if _SHARE_PATH in src:
+        account, _, share = src.partition(_SHARE_PATH)
+        return account, share
+    return src, item.friendly_name.lower()
+
+
 def _derive_unprotected(
     inv: Inventory,
     items: list[ProtectedItem],
@@ -354,7 +433,7 @@ def _derive_unprotected(
     """Compute resources that exist in inventory but aren't covered by a
     protected item."""
     protected_vm: set[str] = set()
-    protected_share: set[str] = set()
+    protected_share: set[tuple[str, str]] = set()
     sql_workload_vm: set[str] = set()
 
     for it in items:
@@ -366,7 +445,7 @@ def _derive_unprotected(
         if bmt == "AzureIaasVM":
             protected_vm.add(src)
         elif bmt == "AzureStorage" and "FileShare" in wt:
-            protected_share.add(src)
+            protected_share.add(_share_key(it))
         elif bmt == "AzureWorkload" and "SQL" in wt:
             # Source on a SQL DB item is sometimes the DB and sometimes the
             # VM. The reliable mapping is via the workload container ->
@@ -392,16 +471,16 @@ def _derive_unprotected(
         )
 
     for fs in inv.file_shares:
-        fsid = fs["id"].lower()
-        if fsid in protected_share:
+        if (fs["storageAccountId"].lower(), fs["name"].lower()) in protected_share:
             continue
+        account = fs["storageAccountId"].rstrip("/").rsplit("/", 1)[-1]
         out.append(
             Unprotected(
                 resource_type="FileShare",
-                name=fs["name"],
+                name=f"{account}/{fs['name']}",
                 resource_group=fs["resourceGroup"],
                 subscription_id=fs["subscriptionId"],
-                location="",
+                location=fs.get("location", ""),
                 detail=(
                     f"tier={fs.get('accessTier', '')}; "
                     f"quotaGiB={fs.get('shareQuota', '')}; "

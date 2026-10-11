@@ -52,7 +52,12 @@ class Waste:
     location: str
     sku: str | None
     reason: str
+    # Median non-zero daily billed cost over the last 30 days, times 30. For a
+    # deallocated VM this is its disks; for a stopped VM, the VM and its disks.
+    # None when the cost query failed.
     est_monthly_cost: float | None = None
+    currency: str | None = None
+    recommended_action: str = ""
 
 
 @dataclass

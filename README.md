@@ -62,7 +62,10 @@ These tools inspect, and in some cases modify, live cloud infrastructure.
 A devcontainer is provided so you don't have to install Python, PowerShell,
 or the Azure CLI on your host. Open the repo in VS Code and choose
 "Reopen in Container". The container installs `pre-commit` and its hooks on
-first build.
+first build. It mounts `~/.azure` and `~/.claude` from the host, creating
+them empty first if they don't exist, so an existing `az login` works inside
+the container. Your host git config is copied in by the Dev Containers
+extension.
 
 Working outside the devcontainer is supported too. You'll need Python 3.12+
 and `pre-commit` on PATH, then run `pre-commit install` once in your

@@ -16,8 +16,12 @@ Snapshot.
   deallocated VMs (disks still billed), stopped-but-not-deallocated VMs
   (compute still billed), orphaned NICs, snapshots older than 90 days,
   non-free App Service plans with no apps, and load balancers with no
-  backend pool members. `est_monthly_cost` is left empty; the tool does
-  not guess prices.
+  backend pool members. Each one gets a `recommended_action` and an
+  `est_monthly_cost` read from actual billing: the median non-zero daily
+  cost over the last 30 days, times 30. A deallocated VM is priced by its
+  disks (its compute is no longer billed), and a stopped VM by the VM and
+  its disks. The estimate is empty when the cost query failed, and 0 for
+  resources that bill nothing (orphaned NICs, for example).
 - **Azure Advisor** recommendations in every category, with annual savings
   and currency where Advisor reports them.
 - **End of support** for Windows Server and SQL Server on:
@@ -63,7 +67,9 @@ Out of scope for v0.1:
    tenant in a single paginated call.
 3. Cost comes from the Cost Management query API: three queries per
    subscription (monthly, by service, by resource group) over a window
-   that ends yesterday (UTC) so every day in it is complete.
+   that ends yesterday (UTC) so every day in it is complete. When there are
+   waste candidates, one more daily query per subscription, filtered to
+   their resource IDs (25 per query), prices them.
 4. Lifecycle status is computed against a table of end-of-support dates in
    `cost_risk_snapshot/lifecycle.py`, with the Microsoft lifecycle pages
    cited next to it.
@@ -143,7 +149,10 @@ client_secret_env = "TENANT_B_CLIENT_SECRET"
 
 `client_secret_env` is the name of an environment variable holding the
 secret. Inline `client_secret = "..."` is also supported for ad hoc use
-but you should prefer env vars in any committed config.
+but you should prefer env vars in any committed config. A credential must
+set all of `tenant_id`, `client_id`, and a secret, or none of them (to use
+the default credential); a partial service principal is rejected rather
+than silently falling back to whatever tenant `az login` is in.
 
 Options:
 
@@ -179,10 +188,11 @@ summary.md                   short human-readable summary
 
 `summary.md` leads with last full month cost, current month run-rate
 (month-to-date extrapolated to the full month), top 5 services, total
-Advisor annual savings, waste count by category, end-of-support counts by
-status, the high-severity security count, and the capture error count.
-Advisor savings are summed as reported and can overlap between
-recommendations.
+Advisor annual savings, waste count and estimated monthly cost by
+category, a cleanup list of the 15 costliest waste candidates with their
+recommended actions, end-of-support counts by status, the high-severity
+security count, and the capture error count. Advisor savings are summed as
+reported and can overlap between recommendations.
 
 The output directory contains resource IDs and cost data. Treat it as
 confidential and keep it out of version control (`outputs/` is ignored).

@@ -10,12 +10,15 @@ from __future__ import annotations
 import calendar
 import csv
 import json
+import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, date, datetime, timedelta
 from enum import IntEnum
 from pathlib import Path
 
+from cost_risk_snapshot.cost import WASTE_COST_DAYS
 from cost_risk_snapshot.lifecycle import ENDED, ENDS_SOON, SUPPORTED, UNKNOWN
 from cost_risk_snapshot.models import (
     AdvisorRecommendation,
@@ -176,13 +179,27 @@ def advisor_savings(result: RunResult) -> dict[str, float]:
     return {k: round(v, 2) for k, v in sorted(out.items())}
 
 
+def waste_cost_totals(waste: list[Waste]) -> dict[str, float]:
+    """Estimated monthly cost of waste candidates, per currency. Rows with no
+    estimate, or no billed cost, are left out."""
+    out: dict[str, float] = defaultdict(float)
+    for w in waste:
+        if w.est_monthly_cost and w.currency:
+            out[w.currency] += w.est_monthly_cost
+    return {k: round(v, 2) for k, v in sorted(out.items())}
+
+
+# Rows shown in the summary's cleanup list; waste.csv has all of them.
+CLEANUP_LIST_LIMIT = 15
+
+
 # --------------------------------------------------------------------------
 # summary.md
 # --------------------------------------------------------------------------
 
 
 def _money(amount: float | None, currency: str) -> str:
-    return "n/a" if amount is None else f"{amount:,.2f} {currency}"
+    return "n/a" if amount is None else f"{amount:,.2f} {currency}".rstrip()
 
 
 def render_summary(result: RunResult) -> str:
@@ -223,7 +240,12 @@ def render_summary(result: RunResult) -> str:
     else:
         lines.append("- Advisor annual savings: none reported")
     counts = concerning_counts(result)
-    lines.append(f"- Waste candidates: {counts['waste']}")
+    waste_totals = waste_cost_totals(f.waste)
+    waste_cost = ", ".join(f"{_money(amt, cur)}/month" for cur, amt in waste_totals.items())
+    lines.append(
+        f"- Waste candidates: {counts['waste']}"
+        + (f" (est. {waste_cost} to clean up)" if waste_cost else "")
+    )
     lines.append(f"- End-of-support: {counts['end_of_support']} ended or ending within 12 months")
     lines.append(f"- High-severity security findings: {counts['security_high']}")
     lines.append(
@@ -249,11 +271,28 @@ def render_summary(result: RunResult) -> str:
     if not waste_by_cat:
         lines.append("_(none)_")
     else:
-        lines.append("| Category | Count |")
-        lines.append("|---|---:|")
+        lines.append("| Category | Count | Est. monthly cost |")
+        lines.append("|---|---:|---:|")
         for cat, n in waste_by_cat.most_common():
-            lines.append(f"| {cat} | {n} |")
-        lines.append("\nSee `waste.csv` for the full list.")
+            totals = waste_cost_totals([w for w in f.waste if w.category == cat])
+            cost = ", ".join(_money(amt, cur) for cur, amt in totals.items()) or "-"
+            lines.append(f"| {cat} | {n} | {cost} |")
+
+        lines.append("\n### Cleanup list\n")
+        ranked = sorted(f.waste, key=lambda w: (-(w.est_monthly_cost or 0), w.category, w.name))
+        lines.append("| Resource | Category | Est. monthly cost | Recommended action |")
+        lines.append("|---|---|---:|---|")
+        for w in ranked[:CLEANUP_LIST_LIMIT]:
+            cost = _money(w.est_monthly_cost, w.currency or "")
+            resource = f"`{w.resource_group}/{w.name}`"
+            lines.append(f"| {resource} | {w.category} | {cost} | {w.recommended_action} |")
+        if len(ranked) > CLEANUP_LIST_LIMIT:
+            lines.append(f"\n{len(ranked) - CLEANUP_LIST_LIMIT} more in `waste.csv`.")
+        lines.append(
+            "\nEstimates are the median daily billed cost over the last "
+            f"{WASTE_COST_DAYS} days, times 30. A deallocated VM is priced by its "
+            "disks. Confirm each item with its owner before deleting anything."
+        )
     lines.append("")
 
     # End of support ---------------------------------------------------
@@ -336,3 +375,20 @@ def render_summary(result: RunResult) -> str:
 
 def now_run_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def new_run_dir(parent: Path, sleep: Callable[[float], None] = time.sleep) -> Path:
+    """Create a fresh run directory under parent.
+
+    The output contract forbids writing into an existing run directory. Run
+    IDs have one-second resolution, so if another run already took this
+    second, wait for the next one.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        run_dir = parent / now_run_id()
+        try:
+            run_dir.mkdir()
+            return run_dir
+        except FileExistsError:
+            sleep(0.25)

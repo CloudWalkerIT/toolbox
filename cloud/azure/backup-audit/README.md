@@ -22,9 +22,13 @@ Out of scope for v0.1:
 ## How it works
 
 1. Inventory via Azure Resource Graph. One ARG query each for vaults,
-   VMs, file shares, and SQL-on-VM resources. ARG handles cross-subscription
-   queries within a tenant in a single call, so a single credential covers
-   everything it can see.
+   VMs, storage accounts, and SQL-on-VM resources. ARG handles
+   cross-subscription queries within a tenant in a single call, so a single
+   credential covers everything it can see. ARG does not index file shares,
+   so each storage account that can hold them (StorageV2, Storage,
+   FileStorage) has its shares listed through the storage management API.
+   An account whose shares can't be listed produces a `CaptureError`, and
+   its shares are left out rather than reported as unprotected.
 2. Per-vault detail via the recovery services backup management SDK. For
    each vault we list policies, protected items, and workload containers
    in parallel.
@@ -102,7 +106,10 @@ client_secret_env = "TENANT_B_CLIENT_SECRET"
 
 `client_secret_env` is the name of an environment variable holding the
 secret. Inline `client_secret = "..."` is also supported for ad hoc use
-but you should prefer env vars in any committed config.
+but you should prefer env vars in any committed config. A credential must
+set all of `tenant_id`, `client_id`, and a secret, or none of them (to use
+the default credential); a partial service principal is rejected rather
+than silently falling back to whatever tenant `az login` is in.
 
 ## Output
 
@@ -127,13 +134,15 @@ Protected items fall into three buckets:
 
 - **Clean**: last backup succeeded, protection state is normal, health is
   passed. Nothing to action.
-- **Warn (needs human review)**: backups completed with warnings, items
-  intentionally suspended or disabled, initial replication still pending,
-  or Azure has flagged the item as `ActionSuggested`. Could be intentional,
-  could be a problem. An auditor must check.
-- **Bad (definite failure)**: last backup failed or is reported unhealthy,
-  the item is in an `Invalid`/`Error` state, or Azure has flagged it as
-  `ActionRequired`. Investigate.
+- **Warn (needs human review)**: backups completed with warnings,
+  protection suspended, paused, or stopped (`BackupsSuspended`,
+  `ProtectionPaused`, `ProtectionStopped`), initial replication still
+  pending (`IRPending`), or Azure has flagged the item as
+  `ActionSuggested`. Could be intentional, could be a problem. An auditor
+  must check.
+- **Bad (definite failure)**: last backup failed or is reported unhealthy
+  or not reachable, the item is in an `Invalid` or `ProtectionError`
+  state, or Azure has flagged it as `ActionRequired`. Investigate.
 
 Both warn and bad cause the audit to report findings (non-zero exit).
 The summary renders them in separate sections so the distinction is
