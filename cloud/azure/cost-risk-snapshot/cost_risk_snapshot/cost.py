@@ -4,12 +4,19 @@ Three ActualCost queries run for each subscription over the same custom
 time window: monthly totals, totals by ServiceName, and totals by
 ResourceGroupName (top N kept). The request body is passed as a plain dict
 in REST shape so it works across azure-mgmt-costmanagement major versions.
+
+Cost Management throttles hard and answers with 429. The query is a POST,
+which azure-core's retry policy never retries on 429, and the wait comes in
+Cost Management's own x-ms-ratelimit-*-retry-after headers rather than
+Retry-After. So throttled queries are retried here.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import time
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 
@@ -27,6 +34,17 @@ TOP_RESOURCE_GROUPS = 25
 
 _AMOUNT_COLUMNS = ("totalcost", "cost", "pretaxcost")
 _DATE_COLUMNS = ("billingmonth", "usagedate")
+
+# Throttling: attempts per query, and the longest single wait in seconds.
+MAX_ATTEMPTS = 4
+MAX_RETRY_WAIT = 60.0
+_RETRY_AFTER_HEADERS = (
+    "retry-after",
+    "x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after",
+    "x-ms-ratelimit-microsoft.costmanagement-entity-retry-after",
+    "x-ms-ratelimit-microsoft.costmanagement-tenant-retry-after",
+    "x-ms-ratelimit-microsoft.costmanagement-clienttype-retry-after",
+)
 
 
 def build_query(
@@ -140,13 +158,53 @@ def error_code(e: Exception) -> str | None:
     return str(status) if status else None
 
 
+def retry_after(e: Exception) -> float | None:
+    """Longest wait, in seconds, that a throttled response asks for."""
+    headers = getattr(getattr(e, "response", None), "headers", None) or {}
+    lowered = {str(k).lower(): v for k, v in headers.items()}
+    waits = []
+    for name in _RETRY_AFTER_HEADERS:
+        try:
+            waits.append(float(lowered[name]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return max(waits) if waits else None
+
+
+def query_with_retry(
+    client: Any,
+    scope: str,
+    body: dict,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
+    """Run one usage query, retrying on 429 up to MAX_ATTEMPTS times."""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            return client.query.usage(scope, body)
+        except Exception as e:
+            if getattr(e, "status_code", None) != 429 or attempt == MAX_ATTEMPTS:
+                raise
+            wait = retry_after(e)
+            if wait is None:
+                wait = 5.0 * 2**attempt
+            wait = min(max(wait, 1.0), MAX_RETRY_WAIT)
+            log.info("cost query for %s throttled; retrying in %.0fs", scope, wait)
+            sleep(wait)
+    raise AssertionError("unreachable")
+
+
 def capture_cost_for_subscription(
-    client: Any, sub: str, start: date, end: date
+    client: Any,
+    sub: str,
+    start: date,
+    end: date,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[Findings, list[CaptureError]]:
     """Run the three cost queries for one subscription.
 
     `client` is a CostManagementClient (or anything with `.query.usage`).
-    Each query fails independently into a CaptureError.
+    Each query fails independently into a CaptureError, after retries if
+    it was throttled.
     """
     scope = f"/subscriptions/{sub}"
     findings = Findings()
@@ -159,7 +217,7 @@ def capture_cost_for_subscription(
     ]
     for name, body in queries:
         try:
-            rows = result_rows(client.query.usage(scope, body))
+            rows = result_rows(query_with_retry(client, scope, body, sleep))
         except Exception as e:  # noqa: BLE001
             log.warning("cost query %s for %s failed: %s", name, sub, e)
             errors.append(
