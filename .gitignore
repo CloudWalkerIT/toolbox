@@ -13,6 +13,11 @@ credentials.*
 gcloud-*.json
 service-account*.json
 
+# --- Tool run output (resource IDs, cost data; confidential) ---
+# Each tool also ignores its own outputs/, but a new tool that forgets to
+# must not be able to commit customer data.
+outputs/
+
 # --- Terraform / IaC state ---
 *.tfstate
 *.tfstate.*
