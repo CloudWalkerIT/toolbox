@@ -68,6 +68,11 @@ class Unprotected:
     reason: str
 
 
+# Appended to Unprotected.reason when a vault in the same subscription could
+# not be read, so the row may in fact be protected.
+UNVERIFIED_MARKER = "unverified: protected items could not be read from"
+
+
 @dataclass
 class CaptureError:
     source: str
