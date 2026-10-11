@@ -190,3 +190,18 @@ def test_sql_on_vm_excluded_when_sql_workload_backed_up() -> None:
     items = [_item("AzureWorkload", "SQLDataBase", vmid)]
     out = _derive_unprotected(inv, items=items, workload_container_vm_ids={vmid.lower()})
     assert out == []
+
+
+def test_item_last_backup_time_is_iso_8601() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from backup_audit.capture import _item_from_sdk
+
+    props = SimpleNamespace(last_backup_time=datetime(2026, 5, 21, 12, 5, 13, tzinfo=UTC))
+    vault = {"name": "rsv", "resourceGroup": "rg", "subscriptionId": "s"}
+    item = _item_from_sdk(SimpleNamespace(name="vm1", properties=props), vault)
+    assert item.last_backup_time == "2026-05-21T12:05:13+00:00"
+
+    item = _item_from_sdk(SimpleNamespace(name="vm1", properties=SimpleNamespace()), vault)
+    assert item.last_backup_time == ""

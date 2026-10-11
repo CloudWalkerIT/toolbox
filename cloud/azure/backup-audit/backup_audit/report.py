@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from enum import IntEnum
@@ -171,7 +173,7 @@ UNPROTECTED_HEADERS = [
 
 def _write_vaults_policies_csv(result: RunResult, path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
         w.writerow(VAULTS_POLICIES_HEADERS)
         for p in result.findings.policies:
             r = p.retention or {}
@@ -200,7 +202,7 @@ def _write_vaults_policies_csv(result: RunResult, path: Path) -> None:
 
 def _write_protected_items_csv(result: RunResult, path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
         w.writerow(PROTECTED_ITEMS_HEADERS)
         for it in result.findings.protected_items:
             w.writerow(
@@ -227,7 +229,7 @@ def _write_protected_items_csv(result: RunResult, path: Path) -> None:
 
 def _write_unprotected_csv(result: RunResult, path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
         w.writerow(UNPROTECTED_HEADERS)
         for u in result.findings.unprotected:
             w.writerow(
@@ -379,3 +381,20 @@ def _render_item_section(lines: list[str], items: list) -> None:
 
 def now_run_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def new_run_dir(parent: Path, sleep: Callable[[float], None] = time.sleep) -> Path:
+    """Create a fresh run directory under parent.
+
+    The output contract forbids writing into an existing run directory. Run
+    IDs have one-second resolution, so if another run already took this
+    second, wait for the next one.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        run_dir = parent / now_run_id()
+        try:
+            run_dir.mkdir()
+            return run_dir
+        except FileExistsError:
+            sleep(0.25)

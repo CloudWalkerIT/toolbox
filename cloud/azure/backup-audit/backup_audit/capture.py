@@ -287,6 +287,14 @@ def _short_policy_name(policy_id: str | None) -> str:
     return policy_id.rstrip("/").rsplit("/", 1)[-1]
 
 
+def _iso(value: Any) -> str:
+    """ISO 8601 for datetimes, as the output contract requires; str() of a
+    datetime gives a space-separated form instead."""
+    if not value:
+        return ""
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _item_from_sdk(it: Any, vault: dict) -> ProtectedItem:
     props = getattr(it, "properties", None)
     err = getattr(props, "last_backup_error_detail", None) if props else None
@@ -306,7 +314,7 @@ def _item_from_sdk(it: Any, vault: dict) -> ProtectedItem:
             or ""
         ),
         policy=_short_policy_name(getattr(props, "policy_id", None)),
-        last_backup_time=str(getattr(props, "last_backup_time", "") or ""),
+        last_backup_time=_iso(getattr(props, "last_backup_time", None)),
         last_backup_status=getattr(props, "last_backup_status", None),
         protection_state=getattr(props, "protection_state", None)
         or getattr(props, "protection_status", None),

@@ -14,7 +14,7 @@ from pathlib import Path
 from backup_audit.capture import capture_for_credential
 from backup_audit.config import Config
 from backup_audit.models import CaptureError, Findings, RunResult, Scope
-from backup_audit.report import ExitCode, now_run_id, write_run
+from backup_audit.report import ExitCode, new_run_dir, write_run
 
 log = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ def run(config: Config | None = None, output_dir: Path | str | None = None) -> R
     )
 
     if output_dir is not None:
-        run_dir = Path(output_dir) / now_run_id()
+        run_dir = new_run_dir(Path(output_dir))
         write_run(result, run_dir)
         log.info("wrote run to %s", run_dir)
 

@@ -20,6 +20,15 @@ def test_write_run_produces_expected_files(tmp_path: Path, sample_result) -> Non
     assert (tmp_path / "summary.md").is_file()
 
 
+def test_csvs_use_lf_line_endings(tmp_path: Path, sample_result) -> None:
+    """The output contract requires \\n line endings; csv.writer defaults to \\r\\n."""
+    write_run(sample_result, tmp_path)
+    for name in ("vaults_policies.csv", "protected_items.csv", "unprotected.csv"):
+        raw = (tmp_path / name).read_bytes()
+        assert raw.endswith(b"\n")
+        assert b"\r" not in raw, name
+
+
 def test_data_json_matches_contract(tmp_path: Path, sample_result) -> None:
     write_run(sample_result, tmp_path)
     data = json.loads((tmp_path / "data.json").read_text())
@@ -184,3 +193,18 @@ def test_severity_buckets_are_disjoint(sample_result, tmp_path) -> None:
     overlap = set(id(i) for i in bad) & set(id(i) for i in warn)
     assert not overlap, "items must not appear in both bad and warn buckets"
     assert len(bad) + len(warn) + len(clean) == len(sample_result.findings.protected_items)
+
+
+def test_new_run_dir_never_reuses_a_directory(tmp_path: Path, monkeypatch) -> None:
+    """Two runs in the same second must not share a run directory."""
+    from backup_audit import report
+
+    ids = iter(["20260521T120000Z", "20260521T120000Z", "20260521T120001Z"])
+    monkeypatch.setattr(report, "now_run_id", lambda: next(ids))
+    waits: list[float] = []
+
+    first = report.new_run_dir(tmp_path / "outputs", sleep=waits.append)
+    second = report.new_run_dir(tmp_path / "outputs", sleep=waits.append)
+    assert first.name == "20260521T120000Z"
+    assert second.name == "20260521T120001Z"
+    assert len(waits) == 1
