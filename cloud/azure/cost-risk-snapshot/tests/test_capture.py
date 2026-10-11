@@ -19,6 +19,7 @@ from cost_risk_snapshot.capture import (
     port_covers,
 )
 from cost_risk_snapshot.config import CredentialSpec
+from cost_risk_snapshot.cost import DailyCost
 from cost_risk_snapshot.models import Findings
 
 SUB = "s1"
@@ -60,6 +61,7 @@ def test_map_waste_row() -> None:
     assert out[0].sku == "Premium_LRS 128GiB"
     assert out[0].reason == "not attached"
     assert out[0].est_monthly_cost is None
+    assert out[0].recommended_action.startswith("Confirm nothing needs the data")
     assert out[1].sku is None
 
 
@@ -76,6 +78,58 @@ def test_every_waste_category_has_query_and_reason() -> None:
     }
     for kql, reason in capture.ARG_WASTE.values():
         assert "resources" in kql and reason
+    assert set(capture.WASTE_ACTIONS) == set(capture.ARG_WASTE)
+
+
+VM_ROW = {
+    "id": "/subscriptions/s1/resourceGroups/RG/providers/Microsoft.Compute/virtualMachines/VM1",
+    "osDiskId": "/subscriptions/s1/resourceGroups/RG/providers/Microsoft.Compute/disks/OS1",
+    "dataDisks": [
+        {"lun": 0, "managedDisk": {"id": "/subscriptions/s1/resourceGroups/RG/disks/DATA1"}},
+        {"lun": 1, "managedDisk": None},
+    ],
+}
+
+
+def test_waste_cost_ids_by_category() -> None:
+    vm = VM_ROW["id"].lower()
+    disks = [VM_ROW["osDiskId"].lower(), "/subscriptions/s1/resourcegroups/rg/disks/data1"]
+    # A deallocated VM is priced by its disks only; a stopped VM also bills compute.
+    assert capture.waste_cost_ids("deallocated_vm", VM_ROW) == disks
+    assert capture.waste_cost_ids("stopped_vm", VM_ROW) == [vm, *disks]
+    assert capture.waste_cost_ids("unattached_disk", {"id": "/X/Disk"}) == ["/x/disk"]
+
+
+def _daily(rid: str, day: str, cost: float) -> DailyCost:
+    return DailyCost(resource_id=rid, day=day, cost=cost, currency="USD")
+
+
+def test_estimate_monthly_cost_uses_median_of_billed_days() -> None:
+    daily = [
+        # Two disks billed on the same days add up per day.
+        _daily("os", "2026-10-01", 0.10),
+        _daily("data", "2026-10-01", 0.05),
+        _daily("os", "2026-10-02", 0.10),
+        _daily("data", "2026-10-02", 0.05),
+        # A partly billed latest day and an unrelated resource are ignored.
+        _daily("os", "2026-10-03", 0.01),
+        _daily("other", "2026-10-02", 99.0),
+        _daily("os", "2026-09-30", 0.0),
+    ]
+    assert capture.estimate_monthly_cost(daily, ["os", "data"]) == (4.5, "USD")
+    assert capture.estimate_monthly_cost(daily, ["nic"]) == (0.0, None)
+
+
+def test_apply_waste_costs_leaves_failed_rows_unknown() -> None:
+    disk = map_waste("unattached_disk", "r", [{"id": "/D1", "name": "d1"}])[0]
+    nic = map_waste("orphaned_nic", "r", [{"id": "/N1", "name": "n1"}])[0]
+    vm = map_waste("deallocated_vm", "r", [{"id": "/VM", "name": "vm"}])[0]
+    cost_ids = {"/d1": ["/d1"], "/n1": ["/n1"], "/vm": ["/os"]}
+    daily = [_daily("/d1", "2026-10-01", 0.2), _daily("/os", "2026-10-01", 0.1)]
+    capture.apply_waste_costs([disk, nic, vm], cost_ids, daily, failed={"/os"})
+    assert (disk.est_monthly_cost, disk.currency) == (6.0, "USD")
+    assert (nic.est_monthly_cost, nic.currency) == (0.0, None)
+    assert vm.est_monthly_cost is None
 
 
 def test_map_advisor_with_and_without_savings() -> None:
@@ -252,12 +306,18 @@ def test_failed_queries_become_capture_errors(monkeypatch) -> None:
 
     monkeypatch.setattr(capture, "query_arg", fake_query)
     monkeypatch.setattr(capture, "_capture_cost", lambda *a, **k: None)
+    waste_cost_calls = []
+    monkeypatch.setattr(capture, "_capture_waste_costs", lambda *a: waste_cost_calls.append(a))
 
     spec = CredentialSpec(name="default", subscriptions=[SUB])
     findings, errors, subs = capture.capture_for_credential(spec, 90, date(2026, 9, 27))
     assert subs == [SUB]
     assert [e.source for e in errors] == ["arg.security.key_vaults"]
     assert [w.name for w in findings.waste] == ["d1"]
+    # Waste costing gets every waste row and its cost IDs.
+    (_, waste, cost_ids, _, _) = waste_cost_calls[0]
+    assert [w.name for w in waste] == ["d1"]
+    assert cost_ids == {"d1": ["d1"]}
 
 
 def test_no_visible_subscriptions_is_an_error(monkeypatch) -> None:

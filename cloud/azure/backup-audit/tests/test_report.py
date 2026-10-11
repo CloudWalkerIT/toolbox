@@ -6,6 +6,7 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
 from backup_audit.report import ExitCode, classify, write_run
 
 
@@ -18,6 +19,15 @@ def test_write_run_produces_expected_files(tmp_path: Path, sample_result) -> Non
     assert (tmp_path / "protected_items.csv").is_file()
     assert (tmp_path / "unprotected.csv").is_file()
     assert (tmp_path / "summary.md").is_file()
+
+
+def test_csvs_use_lf_line_endings(tmp_path: Path, sample_result) -> None:
+    """The output contract requires \\n line endings; csv.writer defaults to \\r\\n."""
+    write_run(sample_result, tmp_path)
+    for name in ("vaults_policies.csv", "protected_items.csv", "unprotected.csv"):
+        raw = (tmp_path / name).read_bytes()
+        assert raw.endswith(b"\n")
+        assert b"\r" not in raw, name
 
 
 def test_data_json_matches_contract(tmp_path: Path, sample_result) -> None:
@@ -117,6 +127,43 @@ def test_classify_backups_suspended_is_warning_not_bad(sample_result) -> None:
     assert _item_is_warning(item) is True
 
 
+@pytest.mark.parametrize(
+    ("protection_state", "expected"),
+    [
+        ("Protected", "CLEAN"),
+        ("IRPending", "WARN"),
+        ("BackupsSuspended", "WARN"),
+        ("ProtectionPaused", "WARN"),
+        ("ProtectionStopped", "WARN"),
+        ("ProtectionError", "BAD"),
+        ("Invalid", "BAD"),
+    ],
+)
+def test_every_sdk_protection_state_is_classified(sample_result, protection_state, expected):
+    """Every ProtectionState value the SDK defines lands in the intended bucket."""
+    from backup_audit.report import Severity, severity
+
+    item = sample_result.findings.protected_items[0]
+    item.last_backup_status = "Healthy"
+    item.health_status = ""
+    item.protection_state = protection_state
+    assert severity(item) is Severity[expected]
+
+
+@pytest.mark.parametrize(
+    ("last_backup_status", "expected"),
+    [("Healthy", "CLEAN"), ("IRPending", "WARN"), ("Unhealthy", "BAD"), ("NotReachable", "BAD")],
+)
+def test_workload_health_last_backup_status(sample_result, last_backup_status, expected):
+    from backup_audit.report import Severity, severity
+
+    item = sample_result.findings.protected_items[0]
+    item.protection_state = "Protected"
+    item.health_status = ""
+    item.last_backup_status = last_backup_status
+    assert severity(item) is Severity[expected]
+
+
 def test_classify_failed_is_bad_not_warning(sample_result) -> None:
     from backup_audit.report import _item_is_bad, _item_is_warning
 
@@ -184,3 +231,18 @@ def test_severity_buckets_are_disjoint(sample_result, tmp_path) -> None:
     overlap = set(id(i) for i in bad) & set(id(i) for i in warn)
     assert not overlap, "items must not appear in both bad and warn buckets"
     assert len(bad) + len(warn) + len(clean) == len(sample_result.findings.protected_items)
+
+
+def test_new_run_dir_never_reuses_a_directory(tmp_path: Path, monkeypatch) -> None:
+    """Two runs in the same second must not share a run directory."""
+    from backup_audit import report
+
+    ids = iter(["20260521T120000Z", "20260521T120000Z", "20260521T120001Z"])
+    monkeypatch.setattr(report, "now_run_id", lambda: next(ids))
+    waits: list[float] = []
+
+    first = report.new_run_dir(tmp_path / "outputs", sleep=waits.append)
+    second = report.new_run_dir(tmp_path / "outputs", sleep=waits.append)
+    assert first.name == "20260521T120000Z"
+    assert second.name == "20260521T120001Z"
+    assert len(waits) == 1

@@ -3,4 +3,4 @@
 from cost_risk_snapshot.run import run
 
 __all__ = ["run"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

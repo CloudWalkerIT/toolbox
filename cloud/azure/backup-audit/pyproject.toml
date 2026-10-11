@@ -15,6 +15,7 @@ dependencies = [
   "azure-mgmt-resourcegraph>=8.0",
   "azure-mgmt-recoveryservicesbackup>=9.1",
   "azure-mgmt-recoveryservices>=3.0",
+  "azure-mgmt-storage>=21.0",
   "azure-mgmt-subscription>=3.1",
 ]
 

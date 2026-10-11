@@ -18,7 +18,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import date
-from typing import Any
+from typing import Any, NamedTuple
 
 from cost_risk_snapshot.models import (
     CaptureError,
@@ -231,3 +231,83 @@ def capture_cost_for_subscription(
         else:
             findings.cost_by_resource_group = map_by_resource_group(sub, rows)
     return findings, errors
+
+
+# --------------------------------------------------------------------------
+# Daily cost per resource, for pricing waste candidates
+# --------------------------------------------------------------------------
+
+# Waste candidates are priced from this many days of billing.
+WASTE_COST_DAYS = 30
+
+# Resource IDs per query. 25 IDs over 31 days stays under the 1000-row page
+# that result_rows reads.
+RESOURCE_ID_CHUNK = 25
+
+
+class DailyCost(NamedTuple):
+    resource_id: str  # lower-cased, as Cost Management reports it
+    day: str  # YYYY-MM-DD
+    cost: float
+    currency: str
+
+
+def build_resource_daily_query(start: date, end: date, resource_ids: list[str]) -> dict:
+    """Daily ActualCost per ResourceId, limited to the given resource IDs."""
+    q = build_query(start, end, granularity="Daily", group_by="ResourceId")
+    q["dataset"]["filter"] = {
+        "dimensions": {"name": "ResourceId", "operator": "In", "values": resource_ids}
+    }
+    return q
+
+
+def _day(row: dict) -> str:
+    s = str(row.get("usagedate") or "")
+    if re.match(r"^\d{8}", s):  # 20261001
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s[:10]
+
+
+def map_daily_resource_costs(rows: list[dict]) -> list[DailyCost]:
+    return [
+        DailyCost(
+            resource_id=str(r.get("resourceid") or "").lower(),
+            day=_day(r),
+            cost=_amount(r),
+            currency=r.get("currency") or "",
+        )
+        for r in rows
+    ]
+
+
+def capture_daily_resource_costs(
+    client: Any,
+    sub: str,
+    resource_ids: list[str],
+    start: date,
+    end: date,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[list[DailyCost], set[str], list[CaptureError]]:
+    """Daily cost for the given resources in one subscription.
+
+    Returns (daily costs, resource IDs whose query failed, errors).
+    """
+    scope = f"/subscriptions/{sub}"
+    ids = sorted({i.lower() for i in resource_ids})
+    daily: list[DailyCost] = []
+    failed: set[str] = set()
+    errors: list[CaptureError] = []
+    for i in range(0, len(ids), RESOURCE_ID_CHUNK):
+        chunk = ids[i : i + RESOURCE_ID_CHUNK]
+        body = build_resource_daily_query(start, end, chunk)
+        try:
+            rows = result_rows(query_with_retry(client, scope, body, sleep))
+        except Exception as e:  # noqa: BLE001
+            log.warning("waste cost query for %s failed: %s", sub, e)
+            failed.update(chunk)
+            errors.append(
+                CaptureError(source=f"cost.{sub}.waste", message=str(e), code=error_code(e))
+            )
+            continue
+        daily.extend(map_daily_resource_costs(rows))
+    return daily, failed, errors
