@@ -102,7 +102,10 @@ client_secret_env = "TENANT_B_CLIENT_SECRET"
 
 `client_secret_env` is the name of an environment variable holding the
 secret. Inline `client_secret = "..."` is also supported for ad hoc use
-but you should prefer env vars in any committed config.
+but you should prefer env vars in any committed config. A credential must
+set all of `tenant_id`, `client_id`, and a secret, or none of them (to use
+the default credential); a partial service principal is rejected rather
+than silently falling back to whatever tenant `az login` is in.
 
 ## Output
 

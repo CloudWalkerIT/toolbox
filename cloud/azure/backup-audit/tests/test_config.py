@@ -103,3 +103,21 @@ name = "same"
     )
     with pytest.raises(ValueError, match="duplicate"):
         load(p)
+
+
+@pytest.mark.parametrize(
+    ("fields", "missing"),
+    [
+        ('tenant_id = "t"', "client_id, client_secret"),
+        ('tenant_id = "t"\nclient_id = "c"', "client_secret"),
+        ('client_id = "c"\nclient_secret = "s"', "tenant_id"),
+        ('tenant_id = "t"\nclient_secret = "s"', "client_id"),
+    ],
+)
+def test_load_rejects_partial_service_principal(tmp_path: Path, fields: str, missing: str) -> None:
+    """A partial SP must not silently fall back to the default credential,
+    which would audit whatever tenant `az login` is in."""
+    p = tmp_path / "c.toml"
+    p.write_text(f'[[credentials]]\nname = "half"\n{fields}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=f"'half' sets .* but not {missing}\\."):
+        load(p)
