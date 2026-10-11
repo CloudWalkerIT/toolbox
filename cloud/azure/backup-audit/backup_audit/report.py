@@ -17,19 +17,20 @@ from pathlib import Path
 
 from backup_audit.models import RunResult
 
-# Last-backup-status classification.
+# Last-backup-status classification. IaaS VM items report job outcomes
+# (Completed, Failed); workload items report ProtectedItemHealthStatus
+# (Healthy, Unhealthy, NotReachable, IRPending).
 SUCCESS_LBS = {"Completed", "Healthy", "Passed", "InProgress"}
-WARNING_LBS = {"CompletedWithWarnings"}
-BAD_LBS = {"Failed", "Unhealthy"}
+WARNING_LBS = {"CompletedWithWarnings", "IRPending"}
+BAD_LBS = {"Failed", "Unhealthy", "NotReachable"}
 
-# Protection-state classification. "Suspended", "Disabled", and
-# "BackupsSuspended" represent a paused state; the protected item is
-# intentionally not being backed up. Those need human review (was it
-# intentional?) but they are not the same as a hard failure.
-# "IRPending" means initial replication pending: normal during onboarding,
-# stuck if it lingers. Treat as warn.
-WARN_PROTECTION_STATES = {"Suspended", "Disabled", "BackupsSuspended", "IRPending"}
-BAD_PROTECTION_STATES = {"Invalid", "Error"}
+# Protection-state classification, using the SDK's ProtectionState values.
+# BackupsSuspended, ProtectionPaused, and ProtectionStopped mean the item is
+# no longer being backed up. That needs human review (was it intentional?)
+# but is not the same as a hard failure. IRPending means initial replication
+# pending: normal during onboarding, stuck if it lingers. Treat all as warn.
+WARN_PROTECTION_STATES = {"BackupsSuspended", "ProtectionPaused", "ProtectionStopped", "IRPending"}
+BAD_PROTECTION_STATES = {"Invalid", "ProtectionError"}
 
 # Health-status classification.
 HEALTHY_HEALTH = {"Passed", "Healthy", "", None}
