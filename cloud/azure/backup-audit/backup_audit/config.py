@@ -82,6 +82,19 @@ def load(path: str | Path) -> Config:
                     f"{secret_env!r} which is unset or empty"
                 )
 
+        # A partial service principal would fall back to DefaultAzureCredential,
+        # which ignores tenant_id and audits whatever tenant `az login` is in.
+        sp_fields = {"tenant_id": tenant_id, "client_id": client_id, "client_secret": secret}
+        given = [k for k, v in sp_fields.items() if v]
+        if given and len(given) < len(sp_fields):
+            missing = [k for k, v in sp_fields.items() if not v]
+            raise ValueError(
+                f"{path}: credential {name!r} sets {', '.join(given)} but not "
+                f"{', '.join(missing)}. A service principal needs tenant_id, client_id, "
+                "and client_secret (or client_secret_env); leave all three out to use "
+                "the default credential."
+            )
+
         subs = c.get("subscriptions")
         if subs is not None and not isinstance(subs, list):
             raise ValueError(
